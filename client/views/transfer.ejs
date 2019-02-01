@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width">
+	<title>M Transfer</title>
+	<script type="text/javascript" src="/js/jquery-3.1.1.min.js"></script>
+	<script type="text/javascript" src="/js/bootstrap.min.js"></script>
+    <script type="text/javascript" src="/js/popper.min.js"></script>
+    <script type="text/javascript" src="/js/mdb.min.js"></script>
+	<script type="text/javascript" src="/js/toastr.min.js"></script>
+	<link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/mdb.min.css" />
+	<link rel="stylesheet" href="/css/common.css" />
+	<link rel="stylesheet" href="/css/toastr.min.css" />
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.6.0/css/font-awesome.min.css">
+</head>
+<body>
+	<div id="header"><%- include views/partial/navbar ; %></div><br/> 
+	<!-- zxingの戻りurlのgetパラメータのデリミタに!を使う -->
+	<form action="/confirmTransfer" method="post" class="overflow">
+	
+	    <p class="h5 text-center mb-4">Transfer</p>
+            <% if(errorMsg.length > 0){ %>
+                <div class="alert alert-danger" role="alert">
+                    <% for(var i=0;i<errorMsg.length;i++){ %>
+                        <p><%= errorMsg[i] %></p>
+                    <% } %>
+                </div>
+            <% } %>
+            <div class="row">	
+                <div class="col-4 text-right">
+                    <label for="fromAccountNo">YourAccount</label>
+                </div>
+                <div class="col">
+                    <select class="selectpicker form-control col" name="fromAccountNo" id="fromAccountNo">
+                        <% for (var i = 0; i < accountInfoList.length; i++) {  %>
+                        <option value="<%= accountInfoList[i].accountNo %>"><B><%= accountInfoList[i].accountNo %></B>  <%= accountInfoList[i].currency %>  <%= accountInfoList[i].accountHolderName %></option>
+                        <% } %>
+                    </select>
+                </div>
+            </div>
+            <div class="row">	
+                <div class="col-4 text-right">
+                    <label for="fromAccountHolderName">YourHolder<br/>Name</label>
+                </div>
+                <div class="col">
+                    <input type="text" id="fromAccountHolderName" name="fromAccountHolderName" class="form-control" 
+                           value="<% if(accountInfoList.length){ %><%= accountInfoList[0].accountHolderName %><% } %>">
+                </div>
+            </div>
+            <div class="row">	
+                <div class="col-4 text-right">
+                    <label for="toAccountNo">Counterparty<br/>AccountNo</label>
+                </div>
+                <div class="col">
+                    <input type="text" id="toAccountNo" name="toAccountNo" class="form-control" value="">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-4 text-right">
+                    <label for="fromPrinc">Principal</label>
+                </div>
+                <div class="col-5">
+                    <input type="text" id="fromPrinc" name="fromPrinc" class="form-control" value="">
+                </div>
+                <div class="col-3">
+                    <input type="text" name="fromCurrency" class="form-control" id="fromCurrency" readonly="readonly" value="<% if(accountInfoList.length){ %><%= accountInfoList[0].currency %><% } %>">
+                </div>
+            </div>
+	
+	    <div class="text-center">
+	        <button id="doneButton" class="btn btn-unique">Confirm <i class="fa fa-send ml-1"></i></button>
+	    </div>
+	
+	</form>
+</body>
+<script>
+    <% if(accountInfoList.length > 0){ %>
+        var accountInfoList = [];
+        <% for (var i = 0; i < accountInfoList.length; i++) {  %>
+            accountInfoList.push({
+                "accountNo":"<%= accountInfoList[i].accountNo %>",
+                "accountHolderName":"<%= accountInfoList[i].accountHolderName %>",
+                "currency":"<%= accountInfoList[i].currency %>"
+            }) ;
+        <% } %>
+        $("#fromAccountNo").change(function(){
+            for(var j=0; j<accountInfoList.length;j++){
+                if($("#fromAccountNo").val() == accountInfoList[j].accountNo){
+                     $("#fromAccountHolderName").val(accountInfoList[j].accountHolderName) ;
+                     $("#fromCurrency").val(accountInfoList[j].currency) ;
+                }
+            }
+        });
+    <% } %>
+</script>
+</html>

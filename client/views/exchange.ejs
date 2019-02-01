@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width">
+	<title>M Transfer</title>
+	<script type="text/javascript" src="/js/jquery-3.1.1.min.js"></script>
+	<script type="text/javascript" src="/js/bootstrap.min.js"></script>
+    <script type="text/javascript" src="/js/popper.min.js"></script>
+    <script type="text/javascript" src="/js/mdb.min.js"></script>
+	<script type="text/javascript" src="/js/toastr.min.js"></script>
+	<link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/mdb.min.css" />
+	<link rel="stylesheet" href="/css/common.css" />
+	<link rel="stylesheet" href="/css/toastr.min.css" />
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.6.0/css/font-awesome.min.css">
+</head>
+<body>
+	<div id="header"><%- include views/partial/navbar ; %></div><br/> 
+	<!-- zxingの戻りurlのgetパラメータのデリミタに!を使う -->
+	<form action="/confirmExchange" method="post" class="overflow">
+	
+
+            <% if(errorMsg.length > 0){ %>
+                <div class="alert alert-danger" role="alert">
+                    <% for(var i=0;i<errorMsg.length;i++){ %>
+                        <p><%= errorMsg[i] %></p>
+                    <% } %>
+                </div>
+            <% } %>
+
+        	    <p class="h5 text-center mb-4">Account Select</p>
+	
+        <div class="row">	
+            <div class="col-3 text-right">
+                <label for="fromAccountNo">From</label>
+            </div>
+            <div class="col">
+                <select class="selectpicker form-control col" name="fromAccountNo" id="fromAccountNo">
+                    <% for (var i = 0; i < accountInfoList.length; i++) {  %>
+                    <option value="<%= accountInfoList[i].accountNo %>"><B><%= accountInfoList[i].accountNo %></B>  <%= accountInfoList[i].currency %>  <%= accountInfoList[i].accountHolderName %></option>
+                    <% } %>
+                </select>
+            </div>
+        </div>
+        <div class="row">	
+            <div class="col-3 text-right">
+                <label for="toAccountNo">To</label>
+            </div>
+            <div class="col">
+                <select class="selectpicker form-control col" name="toAccountNo" id="toAccountNo">
+                    <% for (var i = 0; i < accountInfoList.length; i++) {  %>
+                    <option value="<%= accountInfoList[i].accountNo %>"><B><%= accountInfoList[i].accountNo %></B>  <%= accountInfoList[i].currency %>  <%= accountInfoList[i].accountHolderName %></option>
+                    <% } %>
+                </select>
+            </div>
+        </div>
+        
+        <br/>
+        <p class="h5 text-center mb-4">Enter "From" or "To" Principal</p>
+        <div class="row">
+            <div class="col-3 text-right">
+                <label for="fromPrinc">Rate(ref)</label>
+            </div>
+            <div class="col-5">
+                <p id="rate">1.00</p>
+            </div>
+        </div>
+        
+        <div class="row">
+            <div class="col-3 text-right">
+                <label for="fromPrinc">From</label>
+            </div>
+            <div class="col-1 form-check">
+                <input class="form-check-input" type="radio" name="princFlag" id="princFlagFrom" value="from" checked>
+            </div>
+            <div class="col-5">
+                <input type="text" id="fromPrinc" name="fromPrinc" class="form-control" value="">
+            </div>
+            <div class="col-3">
+                <input type="text" name="fromCurrency" class="form-control" id="fromCurrency" readonly="readonly" value="<% if(accountInfoList.length){ %><%= accountInfoList[0].currency %><% } %>">
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-3 text-right">
+                <label for="toPrinc">To</label>
+            </div>
+            <div class="col-1 form-check">
+                <input class="form-check-input" type="radio" name="princFlag" id="princFlagTo" value="to" >
+            </div>
+            <div class="col-5">
+                <input type="text" id="toPrinc" name="toPrinc" class="form-control" readonly="readonly" value="">
+            </div>
+            <div class="col-3">
+                <input type="text" name="toCurrency" class="form-control" id="toCurrency" readonly="readonly" value="<% if(accountInfoList.length){ %><%= accountInfoList[0].currency %><% } %>">
+            </div>
+        </div>
+        
+	    <div class="text-center">
+	        <button id="doneButton" class="btn btn-unique">Confirm <i class="fa fa-send ml-1"></i></button>
+	    </div>
+	
+	</form>
+</body>
+<script>
+    <% if(accountInfoList.length > 0){ %>
+        var accountInfoList = [];
+        <% for (var i = 0; i < accountInfoList.length; i++) {  %>
+            accountInfoList.push({
+                "accountNo":"<%= accountInfoList[i].accountNo %>",
+                "accountHolderName":"<%= accountInfoList[i].accountHolderName %>",
+                "currency":"<%= accountInfoList[i].currency %>"
+            }) ;
+        <% } %>
+        $("#fromAccountNo").change(function(){
+            for(var j=0; j<accountInfoList.length;j++){
+                if($("#fromAccountNo").val() == accountInfoList[j].accountNo){
+                     $("#fromCurrency").val(accountInfoList[j].currency) ;
+                }
+            }
+            getRate();
+        });
+        $("#toAccountNo").change(function(){
+            for(var j=0; j<accountInfoList.length;j++){
+                if($("#toAccountNo").val() == accountInfoList[j].accountNo){
+                     $("#toCurrency").val(accountInfoList[j].currency) ;
+                }
+            }
+            getRate();
+        });
+        $("input[name='princFlag']:radio").change(function(){
+            if($(this).val() == "from"){
+                $("#fromPrinc").removeAttr("readonly")
+                $("#toPrinc").attr("readonly","readonly")                
+            }else{
+                $("#toPrinc").removeAttr("readonly")
+                $("#fromPrinc").attr("readonly","readonly")                                
+            }
+        });
+    
+        function getRate(){
+            $.ajax({
+                type: 'POST',
+                url: '/getRate',
+                dataType: 'json',
+                data: {
+                    fromCurrency : $("#fromCurrency").val(),
+                    toCurrency : $("#toCurrency").val()
+                 }
+            })
+            .done(function(data) {
+                $("#rate").text(data.rate) ;
+            })
+            .fail(function(data){
+                console.log(data) ;	
+             });        
+        }
+    <% } %>
+</script>
+</html>

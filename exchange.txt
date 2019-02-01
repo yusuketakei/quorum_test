@@ -1,0 +1,69 @@
+ユーザーID(uint)→ユーザー情報(ユーザー基本情報)
+口座(accountAddress)→ユーザーID(uint)
+口座(accountAddress)→口座情報(残高等)
+トランザクションID(uint)→トランザクション情報
+ユーザーID(uint)→トランザクションID(uint)
+リクエストID(uint)→リクエスト情報
+ユーザーID(uint)→リクエストID(uint)
+トランザクションID(uint)→リクエストID(uint)
+
+ユーザー情報{
+　uint userId
+  bytes32 userName
+  bytes32 userAddress  
+  bool delFlg
+}
+
+口座情報{
+  address accountAddress
+  uint type
+  bytes32 currency
+  uint balance
+  uint userId
+  uint createTimestamp
+  uint updateTimestamp
+  bool delFlg
+}  
+
+トランザクション情報{
+  uint transactionId
+  uint status
+  uint type
+  address fromAccountAddress
+  address toAccountAddress
+  bytes32 fromCurrency
+  bytes32 toCurrency
+  bytes32 rate
+  uint fromPrinc
+  uint toPrinc  
+  uint timestamp
+}
+
+リクエスト情報{
+  uint requestId
+  uint status
+  uint type
+  address outAccountAddress
+  address inAccountAddress
+  bytes32 outCurrency
+  bytes32 inCurrency
+  bytes32 rate
+  uint outPrinc
+  uint inPrinc
+  uint timestamp
+}
+
+【基本】
+・ユーザー情報登録
+・ユーザー情報変更
+・ユーザー削除
+・口座開設
+・口座閉塞
+
+【外為】
+・注文
+・受諾
+・拒否
+
+【振込】
+・依頼

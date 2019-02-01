@@ -1,0 +1,1582 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Book P2P</title>
+    <!-- 呪文electronでjqueryを使いつつ、APIも無効化しない-->
+    <script>
+        window.nodeRequire = require;
+        delete window.require;
+        delete window.exports;
+        delete window.module;
+    </script>
+    <script type="text/javascript" src="./js/jquery.min.js"></script>
+    <script type="text/javascript" src="./js/bignumber.min.js"></script>
+    <script type="text/javascript" src="./js/crypto-js.js"></script>
+    <script type="text/javascript" src="./js/utf8.js"></script>
+    <script type="text/javascript" src="./js/web3.min.js"></script>
+    <script type="text/javascript" src="./js/jquery.qrcode.min.js"></script>
+    <script type="text/javascript" src="./js/jquery.magnific-popup.min.js"></script>
+    <script type="text/javascript" src="./js/toastr.js"></script>
+    <script type="text/javascript" src="./js/js-ipfs-api.min.js"></script>
+    <script type="text/javascript" src="./js/neo4j-javascript-driver-1.2.0/lib/browser/neo4j-web.min.js"></script>
+<!--    <script type="text/javascript" src="./js/require.js"></script> -->
+    <script type="text/javascript" src="./js/bootstrap.min.js"></script>
+    <script type="text/javascript" src="./js/mdb.min.js"></script>
+    <script type="text/javascript" src="./js/popper.min.js"></script>
+    <link rel="stylesheet" href="./style/style_index.css" />
+    <link rel="stylesheet" href="./style/magnific-popup.css" />
+    <link rel="stylesheet" href="./style/toastr.css" />
+    <link rel="stylesheet" href="./style/bootstrap.min.css" />
+    <link rel="stylesheet" href="./style/mdb.min.css" />
+
+    <script>
+        /* インスタンス定義エリア */
+        //Electron IPCオブジェクトの取得⇒Server側との接続に使用する
+        const ipc = window.nodeRequire('electron').ipcRenderer
+
+        //configファイルの読込
+        var config = readConfigFile();
+
+        //接続するJSON-RPCサーバのIPアドレスおよびポート番号
+        const GETH_RPC_URL = config.GETH_RPC_URL;
+
+        //web3ライブラリにRPC接続を設定⇒web3ライブラリを使ってRPC接続でGethに繋がる
+        var web3 = new Web3();
+        var provider = new web3.providers.HttpProvider(GETH_RPC_URL);
+        web3.setProvider(provider);
+
+        //デフォルトアカウントの設定⇒account指定が無い場合に命令を実行するアカウント
+        web3.eth.defaultAccount = web3.eth.accounts[0];
+
+        //CNSのアドレス（設定ファイルには入れない）
+        const CONTRACT_CNS_ADDRESS = "0x3e63d5ca4394bf5bebf9f75ae84620dd5b4ae3c2";
+
+        //CNSをもとに、各Contractのアドレスを取得
+        var contractCns = web3.eth.contract(config.CONTRACT_CNS_ABI).at(config.CONTRACT_CNS_ADDRESS);
+        const CONTRACT_USERLOGIC_ADDRESS = getAddressBytes(contractCns.getContractCurrentAddress("UserLogic"));
+        const CONTRACT_BOOKLOGIC_ADDRESS = getAddressBytes(contractCns.getContractCurrentAddress("BookLogic"));
+        const CONTRACT_TRANSACTIONLOGIC_ADDRESS = getAddressBytes(contractCns.getContractCurrentAddress("TransactionLogic"));
+        console.log(CONTRACT_USERLOGIC_ADDRESS);
+        console.log(CONTRACT_BOOKLOGIC_ADDRESS);
+        console.log(CONTRACT_TRANSACTIONLOGIC_ADDRESS);
+        
+        //接続するContractのアドレスを指定してcontractオブジェクトを取得
+        var contractUserLogic = web3.eth.contract(config.CONTRACT_USERLOGIC_ABI).at(CONTRACT_USERLOGIC_ADDRESS);
+        var contractBookLogic = web3.eth.contract(config.CONTRACT_BOOKLOGIC_ABI).at(CONTRACT_BOOKLOGIC_ADDRESS);
+        var contractTransactionLogic = web3.eth.contract(config.CONTRACT_TRANSACTIONLOGIC_ABI).at(CONTRACT_TRANSACTIONLOGIC_ADDRESS);
+
+        //contractの実行に使用するgasを指定
+        //TODO 設定ファイル化
+        const gas = config.CONTRACT_GAS;
+
+        //contractから返されるアドレス初期値
+        const zeroByteAddress = "0x0000000000000000000000000000000000000000";
+
+        //neo4jのコネクション
+        var neo4j = window.neo4j.v1;
+        //TODO 設定ファイル化
+        var neo4jDriver = neo4j.driver(config.NEO4J_URL, neo4j.auth.basic("neo4j", "password"));
+
+        //バーコード読取り用(QRコード表示用)のurl
+        //TODO 設定ファイル化
+        const uploadUrl = config.UPLOAD_URL;
+
+        //書籍ダウンロード用のurl
+        const downloadBookUrl = config.DOWNLOAD_BOOK_URL;
+        const searchBookUrl = config.SEARCH_BOOK_URL;
+        const downloadTrnUrl = config.DOWNLOAD_TRN_URL;
+
+        //Gethでmining中のトランザクションを格納するオブジェクト配列
+        var miningTxs = [];
+        //Gethの最新のblock生成を監視するfilter
+        var filter = web3.eth.filter("latest");
+
+        //ステータス等定数値
+        const MINING_STATUS_ADD_BOOK = "本の公開mining";
+        const MINING_STATUS_REQUESTING = "リクエストmining";
+        const MINING_STATUS_RENTAL_OK = "貸出mining";
+        const MINING_STATUS_RENTAL_NG = "拒否mining";
+        const MINING_STATUS_RENTAL_START = "貸出受領mining";
+        const MINING_STATUS_RENTAL_END = "返却受領mining";
+        const MINING_STATUS_EDIT_USER = "ユーザ編集mining";
+
+        const STATUS_REQUESTING = "貸出待ち";
+        const STATUS_REQUEST_NG = "貸出NG";
+        const STATUS_RENTAL_START = "受領待ち";
+        const STATUS_RENTALING = "貸出中";
+        const STATUS_RENTAL_END = "返却済";
+        
+        const DOWNLOAD_TRN_TYPE_REQUESTING = 0 ;
+        const DOWNLOAD_TRN_TYPE_RENTAL_START = 1 ;
+        const DOWNLOAD_TRN_TYPE_RENTAL_END = 2 ;
+        
+        //Contractの1ロジックの配列の行数(全ロジック共通)
+        const CONTRACT_ARRAY_ROWS = 5
+        
+        //ステータス情報のキャッシュ
+        var cacheStatusList = [];
+        //ステータス表示のページあたり件数
+        const STATUS_NUM_PER_PAGE = 5 ;
+        
+        //検索結果書籍情報のキャッシュ
+        var cacheSearchBookList = [];
+        const BOOK_NUM_PER_PAGE = 5 ;
+        
+        /* 
+        Gethが最新のBlockを検知したら、自分が発行したトランザクションのハッシュとつき合わせてminingされたか確認
+        minedのトランザクションがあれば、miningトランザクションから削除してステータスの表示を更新する
+        */
+        filter.watch(function(error, latestBlockHash) {
+            if (!error) {
+                //検知した最新のブロックハッシュからブロックオブジェクトを取得
+                var block = web3.eth.getBlock(latestBlockHash);
+                //ブロックからマイニングされたトランザクションを取り出す
+                var minedTxs = block.transactions;
+                console.log(minedTxs);
+                if(minedTxs.length){
+                    console.log(web3.eth.getTransaction(minedTxs[0]));
+                }
+                //1つ以上のマイニングトランザクションの変更を検知
+                var changeFlg = 0;
+
+                //ハッシュの突合せによりマイニングされたトランザクションはマイニング中トランザクション(miningTxs)から削除
+                for (miningTxs_i = 0; miningTxs_i < miningTxs.length; miningTxs_i++) {
+                    for (minedTxs_i = 0; minedTxs_i < minedTxs.length; minedTxs_i++) {
+                        //hashの突合せ
+                        if (miningTxs[miningTxs_i].txhash == minedTxs[minedTxs_i]) {
+                            changeFlg = 1;
+                            //minedトランザクションにあるものはminingトランザクションから削除
+                            miningTxs.splice(miningTxs_i, 1);
+                        }
+                    }
+                }
+                //1つ以上のマイニングトランザクションの変更があればステータスの表示を更新する
+                if (changeFlg) {
+                    clearStatus();
+                }
+            }
+        });
+
+        //ログイン中のアカウントアドレス
+        var loginAccountaddress;
+
+        /* 関数定義エリア */
+        //Gethのアカウントアドレスでログイン(アンロック)
+        function login() {
+            //ログインアカウントアドレスの設定
+            loginAccountaddress = $("#accountAddress").val();
+            //デフォルト実行アカウントの設定
+            web3.eth.defaultAccount = loginAccountaddress;
+            //パスワードの取得
+            var password = $("#accountPassword").val();
+            //RPC接続用のJSONデータの作成
+            var JSONdata = createGethRpcJSONdata("personal_unlockAccount", [loginAccountaddress, password, 1000]);
+
+            //JSONをRPC経由で送信
+            executeJsonRpc(GETH_RPC_URL, JSONdata, function success(data) {
+                //ログイン成功したら各種初期処理
+                if (data.error == null) {
+                    loger("login success!");
+                    toastr.success("login success!");
+                    //ユーザの情報表示
+                    myUserInfo();
+                    //貸借等の状態表示
+                    clearStatus();
+                    //QRコードの生成
+                    createAddBookQrcode();
+                    //書籍検索結果のクリア
+                    cacheSearchBookList = [] ;
+                } else {
+                    //ログインエラー
+                    loger("login error");
+                    toastr.error("login error");
+                }
+            }, function error(data) {
+                //ログインエラー
+                loger("login error");
+            });
+
+        }
+        function signup(){
+            //passwordの取得
+            var password = $("#accountPassword").val();
+            
+            //passwordを元にgeth accountの作成
+            //RPC接続用のJSONデータの作成
+            var JSONdata = createGethRpcJSONdata("personal_newAccount", [password]);
+
+            //JSONをRPC経由で送信
+            executeJsonRpc(GETH_RPC_URL, JSONdata, function success(data) {
+                //ログイン成功したら各種初期処理
+                if (data.error == null) {
+                    loger("signup success!");
+                    //geth accountのアドレスを取得
+                    var accountAddr = data.result ;
+                    
+                    //作成したaccountの情報を表示
+                    //magnificPopupライブラリを使用してポップアップ表示
+                    $.magnificPopup.open({
+                        items: {
+                            src: '<div class="popupItems"><h4>' +
+                                '下記の通りアカウントを新規作成しました。忘れないようにお願いします。<br/>ログイン後、ユーザ登録をお願いします。<br/>' +
+                                'ユーザ登録するための仮想通貨を得るまでに時間を要する場合があります。</h4>' +
+                                '<table class="zebra" id="counterUserTable">' +
+                                '<tr><th>account</th><th>password</th><th>アカウント作成先サーバ</th></tr>' +
+                                '<tr><td>' + accountAddr + '</td>' + '<td>' + password + '</td><td>' + GETH_RPC_URL +
+                                '</td></tr>' +
+                                '</table></div>'
+                        },
+                        type: 'inline'
+                    });                    
+                    
+                } else {
+                    //signupエラー
+                    loger("signup error");
+                    toastr.error("signup error");
+                }
+            }, function error(data) {
+                //ログインエラー
+                loger("signup error");
+            });            
+            
+
+        }
+
+        /* 登録系 */
+
+        //ユーザー情報登録&更新
+        function editMyUserInfo() {
+            //コントラクトからユーザ情報を取得
+            var myUserInfo = convertMyUserInfo(contractUserLogic.myUserInfo());
+            //コントラクトuserinfoのアカウントアドレス列が初期値なら登録未済なので、入力情報を元に登録する
+            if (myUserInfo.userAddress == zeroByteAddress) {
+                //ユーザー情報をIPFSに登録して、hashを取得
+                var hash = addToIpfs({
+                    "user_name": $("#userName").val(),
+                    "user_office": $("#userOffice").val(),
+                    "user_department": $("#userDepartment").val()
+                });
+                
+                var miningObj = new Object();
+                //ipfsのhashを2分割してブロックチェーンに登録（ブロックチェーンの有効桁数の都合上）
+                var slicedHash = sliceHash(hash);
+                miningObj.txhash = contractUserLogic.registMyUserInfo.sendTransaction(slicedHash.hashFirst, slicedHash.hashSecond, {
+                    from: loginAccountaddress,
+                    gas: gas
+                });
+
+                //miningObjの登録
+                miningObj.status = MINING_STATUS_EDIT_USER;
+                pushMiningTx(miningObj);
+                
+                //Neo4j登録用パラメータ生成
+                var queryObj = {};
+                //User Node
+                queryObj.nodeName = "User";
+                //User Nodeのパラメータ
+                var params = [{
+                        label: "name",
+                        value: $("#userName").val()
+                    },
+                    {
+                        label: "office",
+                        value: $("#userOffice").val()
+                    },
+                    {
+                        label: "department",
+                        value: $("#userDepartment").val()
+                    }
+                ];
+                queryObj.params = params;
+
+                //Neo4jにユーザノードを登録
+                createNodeToNeo4j(queryObj);
+
+
+            }
+            //userinfoのアドレス列が初期値以外なら更新
+            else {
+
+                //ユーザー情報をIPFSに登録して、hashを取得
+                var hash = addToIpfs({
+                    "user_name": myUserInfo.userName,
+                    "user_office": $("#userOffice").val(),
+                    "user_department": $("#userDepartment").val()
+                });
+
+                var miningObj = new Object();
+                //ipfsのhashを2分割してブロックチェーンに登録（ブロックチェーンの有効桁数の都合上）
+                var slicedHash = sliceHash(hash);
+                miningObj.txhash = contractUserLogic.updateMyUserInfo.sendTransaction(slicedHash.hashFirst, slicedHash.hashSecond, {
+                    from: loginAccountaddress,
+                    gas: gas
+                });
+                
+                //miningObjの登録
+                miningObj.status = MINING_STATUS_EDIT_USER;
+                pushMiningTx(miningObj);
+
+                //Neo4j更新用パラメータ生成
+                var queryObj = {};
+                //User Node
+                queryObj.nodeName = "User";
+                //User Nodeのパラメータ(検索部)
+                var matchParams = [{
+                    label: "name",
+                    value: $("#userNameT").text()
+                }];
+                queryObj.matchParams = matchParams;
+                //User Nodeのパラメータ(セット部)
+                var setParams = [{
+                        label: "office",
+                        value: $("#userOffice").val()
+                    },
+                    {
+                        label: "department",
+                        value: $("#userDepartment").val()
+                    }
+                ];
+                queryObj.setParams = setParams;
+                //Neo4jを更新
+                updateNeo4jNode(queryObj);
+
+            }
+        }
+
+        //取引情報をダウンロードして追加
+        function downloadTrn(){
+            var url = downloadTrnUrl + loginAccountaddress;
+            $.getJSON(url, function(data) {
+                loger(data);
+                //ブロックチェーンに登録
+                data.forEach(function(row, trn_i) {
+                    //ISBNから書籍情報を特定
+                    var indexLength = contractBookLogic.getIsbnIndexListLength(row.isbn) ;
+
+                    //contractからインデックスをずらしつつ取得→ISBNに紐付くBookIDを取得する
+                    var targetBookList = [] ;
+                    for(var getBook_i=0 ; getBook_i<indexLength ; getBook_i=getBook_i+CONTRACT_ARRAY_ROWS){
+                        var convertedBookInfoList = convertBookInfoList(contractBookLogic.searchBookListByIsbnDesc(row.isbn,getBook_i)) ;
+                        if(getBook_i == 0 && convertBookInfoList.length == 0){
+                            //最初のインデックスでリストがContractから取得できない書籍は、break
+                            break;     
+                        }
+                        //Contractから一件でも取得できれば、検索結果に結合する
+                        Array.prototype.push.apply(targetBookList,convertedBookInfoList); 
+                    }
+                    //リクエストを処理
+                    if(row.type == DOWNLOAD_TRN_TYPE_REQUESTING){
+
+                        //リクエスト処理(全BookIdに対して)
+                        targetBookList.forEach(function(req_row, req_i) {
+                            requestRental(req_row.bookId);
+                        });    
+                    }
+                    //授受を処理
+                    else if (row.type == DOWNLOAD_TRN_TYPE_RENTAL_START){
+                        //自分に関連するRentalTrnをインデックスをずらしながら最新から取得→取得したBookIdに紐付く取引を検索
+                        var myRentalIndexLength = contractTransactionLogic.myRentalNum() ;
+                        
+                        //Contractからは一定件数ずつ取りながら、その内部でその件数の中での繰り返しを回す
+                        for(var getRental_i=0 ; getRental_i<myRentalIndexLength ; 
+                            getRental_i=getRental_i+CONTRACT_ARRAY_ROWS){
+                            var convertedRentalList = 
+                                convertRentalList(contractTransactionLogic.myRentalListDesc(getRental_i)) ;
+
+                            //RentalListの中にターゲットとなるBookIdを持ち、貸出開始時刻が空のものがあるか確認
+                            //あれば、貸出し開始し、処理を終える
+                            convertedRentalList.forEach(function(rental_row, rental_i) {
+                                //startTimeが入っているものは飛ばす
+                                if(rental_row.startTime){
+                                    
+                                }else{
+                                     //targetBookListに該当するBookIdを持つものがあるか確認
+                                    targetBookList.forEach(function(targetBook_row, targetBook_i) {
+                                        if(rental_row.bookId == targetBook_row.bookId){
+                                            //targetBookと同じIDを持つRental情報があれば、貸出し開始
+                                            startRental(rental_row.rentalId,rental_row.bookId,targetBook_row.title,rental_row.lenderAddress) ;
+                                        }
+                                    });                                   
+                                }
+                            });
+                        }                                           
+                    }
+                    else if (row.type == DOWNLOAD_TRN_TYPE_RENTAL_END){
+                        //自分に関連するRentalTrnをインデックスをずらしながら最新から取得→取得したBookIdに紐付く取引を検索
+                        var myRentalIndexLength = contractTransactionLogic.myRentalNum() ;
+                        
+                        //Contractからは一定件数ずつ取りながら、その内部でその件数の中での繰り返しを回す
+                        for(var getRental_i=0 ; getRental_i<myRentalIndexLength ; 
+                            getRental_i=getRental_i+CONTRACT_ARRAY_ROWS){
+                            var convertedRentalList = 
+                                convertRentalList(contractTransactionLogic.myRentalListDesc(getRental_i)) ;
+
+                            //RentalListの中にターゲットとなるBookIdを持ち、貸出開始時刻が空のものがあるか確認
+                            //あれば、貸出し開始し、処理を終える
+                            convertedRentalList.forEach(function(rental_row, rental_i) {
+                                //startTimeが入っていないものは飛ばす
+                                if(!rental_row.startTime){
+                                    
+                                }else{
+                                    //targetBookListに該当するBookIdを持つものがあるか確認
+                                    targetBookList.forEach(function(targetBook_row, targetBook_i) {
+                                        if(rental_row.bookId == targetBook_row.bookId){
+                                            //targetBookと同じIDを持つRental情報があれば、貸出し開始
+                                            endRental(rental_row.rentalId,rental_row.bookId,targetBook_row.title,rental_row.borrowerAddress) ;
+                                        }
+                                    });                                    
+                                }
+                            });
+                        }                            
+                    }
+                });
+            });            
+        }
+        
+        //本をダウンロードして追加
+        function downloadBookInfo() {
+            var url = downloadBookUrl + loginAccountaddress;
+            $.getJSON(url, function(data) {
+                console.log("download");
+                loger(data);
+                //ブロックチェーンに登録
+                data.forEach(function(row, i) {
+                    addBookInfo(row);
+                });
+            });
+        }
+
+        //本の登録(公開)
+        function addBookInfo(bookInfo) {
+            var myUserInfo = convertMyUserInfo(contractUserLogic.myUserInfo());
+
+            //本をIPFSに登録して、hashを取得
+            bookInfo.hash = addToIpfs({
+                "book_title": bookInfo.title,
+                "book_author": bookInfo.author,
+                "book_isbn": bookInfo.isbn
+            });
+
+            //本の登録をしつつ、txhashを取得
+            var miningObj = new Object();
+            //TODO hashは２分割してブロックチェーンに渡す
+            var slicedHash = sliceHash(bookInfo.hash);
+            bookInfo.hashFirst = slicedHash.hashFirst;
+            bookInfo.hashSecond = slicedHash.hashSecond;
+            miningObj.txhash = contractBookLogic.addBookInfo.sendTransaction(bookInfo.isbn, bookInfo.hashFirst, bookInfo.hashSecond, {
+                from: loginAccountaddress,
+                gas: gas
+            })
+
+            //本の登録情報をmining中リストに登録する
+            miningObj.bookTitle = bookInfo.title;
+            miningObj.status = MINING_STATUS_ADD_BOOK;
+            pushMiningTx(miningObj);
+
+
+            /* neo4jにBookノードを登録する */
+            //Neo4j登録用パラメータ生成
+            var addQueryObj = {};
+            //Book Node
+            addQueryObj.nodeName = "Book";
+            //User Nodeのパラメータ
+            var addParams = [{
+                    label: "title",
+                    value: bookInfo.title
+                },
+                {
+                    label: "author",
+                    value: bookInfo.author
+                },
+                {
+                    label: "ISBN",
+                    value: bookInfo.isbn
+                }
+            ];
+            addQueryObj.params = addParams;
+            //Neo4jにBookノードを登録
+            createNodeToNeo4j(addQueryObj);
+
+
+            /*neo4jにOwnerの関係性を登録する(n1->n2)*/
+            var addRelationQueryObj = {};
+            //n1:User Node
+            addRelationQueryObj.nodeName1 = "User";
+            //n2:Book Node
+            addRelationQueryObj.nodeName2 = "Book";
+
+            //n1:User Nodeの検索パラメータ
+            var matchParams1 = [{
+                label: "name",
+                value: myUserInfo.userName
+            }];
+            addRelationQueryObj.matchParams1 = matchParams1;
+
+            //n2:Book Nodeの検索パラメータ
+            var matchParams2 = [{
+                label: "title",
+                value: bookInfo.title
+            }];
+            addRelationQueryObj.matchParams2 = matchParams2;
+            //関係性=owner
+            addRelationQueryObj.relationRole = "owner";
+
+            //関係性の追加
+            addRelationToNeo4j(addRelationQueryObj);
+
+        }
+
+        /* 情報表示系 */
+        
+        //本の検索
+        function searchBookInfo() {
+            var url = searchBookUrl + $("#searchBookKey").val();
+            $.getJSON(url, function(data) {
+                loger(data);
+                //検索情報を表示
+                loadSearchBookInfo(data) ;
+                showSearchBookInfo(1) ;
+                toastr.success("search success!");
+            });
+        }
+
+        //ユーザ情報表示
+        function myUserInfo() {
+            var contractMyUserInfo = contractUserLogic.myUserInfo();
+            var userInfo = convertMyUserInfo(contractMyUserInfo);
+            $("#userNameT").text(userInfo.userName);
+            $("#userOfficeT").text(userInfo.userOffice);
+            $("#userDepartmentT").text(userInfo.userDepartment);
+            $("#userPointT").text(userInfo.userPoint);
+        }
+
+        //書籍追加用QRコードの生成
+        function createAddBookQrcode() {
+            //事前にQRコードが生成されている場合があるので、一旦クリア
+            if ($("#addBookQrcode canvas")) {
+                $("#addBookQrcode canvas").remove();
+            }
+            //textの内容でQRコードを生成
+            $("#addBookQrcode").qrcode({
+                width: 250,
+                height: 250,
+                text: uploadUrl + loginAccountaddress
+            });
+        }
+
+        //書籍追加用サイトのQRコード表示
+        function showAddBookQrcode() {
+            //ログイン時に生成しておいたQRコードを非表示⇒表示する
+            $("#addBookQrcode").css('display', 'block');
+            //magnificPopupライブラリを使用してポップアップ表示
+            $.magnificPopup.open({
+                items: {
+                    src: $("#addBookQrcode")
+                },
+                type: 'inline'
+            });
+        }
+
+        //取引相手情報の表示
+        function showCounterUserInfo(counterUserAddress) {
+            //User情報の取得
+            var counterUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(counterUserAddress));
+
+            //magnificPopupライブラリを使用してポップアップ表示
+            $.magnificPopup.open({
+                items: {
+                    src: '<div class="popupItems"><h3>下記の相手に社内便等で貸出をお願いします。</h3><table class="zebra" id="counterUserTable">' +
+                        '<tr><th>相手の名前</th><th>相手の執務室</th><th>相手の部署</th></tr>' +
+                        '<tr><td>' + counterUserInfo.userName + '</td>' + '<td>' + counterUserInfo.userOffice + '</td>' + '<td>' + counterUserInfo.userDepartment + '</td></tr>' +
+                        '</table></div>'
+                },
+                type: 'inline'
+            });
+        }
+        //書籍検索結果のロード（キャッシュに保存）
+        function loadSearchBookInfo(bookInfoList){
+            //キャッシュのクリア
+            cacheSearchBookList = [] ;
+            //Blockchainから情報のロード
+            //bookInfoListから重複しないISBNのループをしつつ、contractのインデックスをずらしつつ取得する
+            var prevIsbn = "" ;
+            bookInfoList.forEach(function(row, i) {
+                //前のISBNの重複しなければContractから情報を取得
+                if(prevIsbn != row.isbn){
+                    prevIsbn = row.isbn ;
+                    var indexLength = contractBookLogic.getIsbnIndexListLength(row.isbn) ;
+                    //contractからインデックスをずらしつつ取得
+                    for(var i=0 ; i<indexLength ; i=i+CONTRACT_ARRAY_ROWS){
+                        var convertedBookInfoList = convertBookInfoList(contractBookLogic.searchBookListByIsbnDesc(row.isbn,i)) ;
+                        if(i == 0 && convertBookInfoList.length == 0){
+                            //最初のインデックスでリストがContractから取得できない書籍は、BCにダウンロード未済の旨表示
+                            cacheSearchBookList.push({
+                                bookId:"登録仕掛",
+                                isbn:row.isbn,
+                                title:row.title,
+                                author:row.author
+                            })
+                            break;     
+                        }
+                        //Contractから一件でも取得できれば、検索結果に結合する
+                        Array.prototype.push.apply(cacheSearchBookList,convertedBookInfoList); 
+                    }
+                }
+            });
+               
+        }
+        //キャッシュに格納した書籍検索結果をページングしつつ、検索結果を表示
+        function showSearchBookInfo(pageNumber){
+            var maxPage = Math.ceil(cacheSearchBookList.length / BOOK_NUM_PER_PAGE) ;
+            var prevPage = pageNumber -1 ;
+            if(pageNumber == 1){
+                var prevPageIsActive = "disabled" ;
+            }
+            var nextPage = pageNumber +1 ;
+            if(pageNumber == maxPage){
+                var nextPageIsActive = "disabled" ;
+            }
+            
+            //表示対象のページ番号はactive表示(前後ボタンも付ける)
+            $("#bookPageItem").empty();
+
+            $("#bookPageItem").append('<li class="page-item '+ prevPageIsActive +'"><button class="page-link" '
+                                   + 'onclick="showSearchBookInfo('+ prevPage +');" aria-label="Previous">'
+                                   + '<span aria-hidden="true">&laquo;</span><span class="sr-only">Previous</span></button></li>'
+                                    ) ;
+            
+            for(var i=1 ; i<=maxPage ; i++){
+                if(i==pageNumber){
+                    $("#bookPageItem").append('<li class="page-item active"><button class="page-link" onclick="showSearchBookInfo('+i+');">'+i+'<span class="sr-only">(current)</span></button></li>') ;                   
+                }else{
+                    $("#bookPageItem").append('<li class="page-item"><button class="page-link" onclick="showSearchBookInfo('+i+');">'+i+'</button></li>') ; 
+                }
+            }
+            
+            $("#bookPageItem").append('<li class="page-item '+ nextPageIsActive +'"><button class="page-link" '
+                                   + 'onclick="showSearchBookInfo('+ nextPage +');" aria-label="Next">'
+                                   + '<span aria-hidden="true">&raquo;</span><span class="sr-only">Next</span></button></li>'
+                                    ) ;
+                 
+            
+            //コンテンツ表示
+            // テーブル取得
+            var table = document.getElementById("bookList");
+
+            //テーブルをリセット
+            while (table.rows[1]) table.deleteRow(-1);
+            
+            //テーブル表示
+            for (var i = (pageNumber-1)*BOOK_NUM_PER_PAGE; i < pageNumber*BOOK_NUM_PER_PAGE; i++) {
+                //配列の要素数を超えたらbreak
+                if(i==cacheSearchBookList.length){
+                    break ;
+                }
+                
+                // 行を行末に追加
+                var row = table.insertRow(-1);
+                // セルの挿入
+
+                //自分が持っていない本は借りるリクエストボタンを表示
+                if (cacheSearchBookList[i].holder != loginAccountaddress) {
+                    insertCell(row, '<input type="button" class="cButton btn-primary waves-light " value="借りる" onclick="requestRental(' + (cacheSearchBookList[i].bookId).toString() + ') ;" >');
+                } else {
+                    insertCell(row, "");
+                }
+                insertCell(row, cacheSearchBookList[i].bookId);
+                insertCell(row, cacheSearchBookList[i].title);
+                insertCell(row, cacheSearchBookList[i].author);
+                insertCell(row, cacheSearchBookList[i].isbn);
+            }    
+        }
+        
+        //本情報全件表示
+        function showAllBookInfo() {
+            // テーブル取得
+            var table = document.getElementById("bookList");
+
+            //テーブルをリセット
+            while (table.rows[1]) table.deleteRow(-1);
+
+            //本情報取得(開始IDが空の場合は開始インデックスから startBookIndex-1)
+            if ($("#startBookIndex").val() < 0 || $("#startBookIndex").val() == "") {
+                var contractBookInfoList = contractBookLogic.allBookList(0);
+            } else {
+                var contractBookInfoList = contractBookLogic.allBookList($("#startBookIndex").val() - 1);
+            }
+            //利用可能な本情報リストの取得
+            var bookInfoList = convertBookInfoList(contractBookInfoList);
+
+            //テーブル表示
+            for (var i = 0; i < bookInfoList.length; i++) {
+                //book idが0（初期値）のものは対象外
+                if (bookInfoList[i].bookId == 0) {
+                    continue;
+                }
+                // 行を行末に追加
+                var row = table.insertRow(-1);
+                // セルの挿入
+
+                //自分が持っていない本は借りるリクエストボタンを表示
+                if (bookInfoList[i].holder != loginAccountaddress) {
+                    insertCell(row, '<input type="button" class="btn" value="借りる" onclick="requestRental(' + (bookInfoList[i].bookId).toString() + ') ;" >');
+                } else {
+                    insertCell(row, "");
+                }
+                insertCell(row, bookInfoList[i].bookId);
+                insertCell(row, bookInfoList[i].title);
+                insertCell(row, bookInfoList[i].author);
+                insertCell(row, bookInfoList[i].isbn);
+                insertCell(row, bookInfoList[i].owner);
+                insertCell(row, bookInfoList[i].holder);
+
+            }
+        }
+        
+        //ステータスの初期化
+        function clearStatus(){
+            loadStatus() ;
+            showStatus(1) ;
+        }
+        
+        //本の貸借ステータスのページング
+        function showStatus(pageNumber){
+            //ページングの描画
+            var maxPage = Math.ceil(cacheStatusList.length / STATUS_NUM_PER_PAGE) ;
+            var prevPage = pageNumber -1 ;
+            if(pageNumber == 1){
+                var prevPageIsActive = "disabled" ;
+            }
+            var nextPage = pageNumber +1 ;
+            if(pageNumber == maxPage){
+                var nextPageIsActive = "disabled" ;
+            }
+ 
+            //表示対象のページ番号はactive表示(前後ボタンも付ける)
+            $("#statusPageItem").empty();
+            $("#statusPageItem").append('<li class="page-item '+ prevPageIsActive +'"><button class="page-link" '
+                                       + 'onclick="showStatus('+ prevPage +');" aria-label="Previous">'
+                                       + '<span aria-hidden="true">&laquo;</span><span class="sr-only">Previous</span></button></li>'
+                                        ) ;
+            for(var i=1 ; i<=maxPage ; i++){
+                if(i==pageNumber){
+                    $("#statusPageItem").append('<li class="page-item active"><button class="page-link" onclick="showStatus('+i+');">'+i+'<span class="sr-only">(current)</span></button></li>') ;                   
+                }else{
+                    $("#statusPageItem").append('<li class="page-item"><button class="page-link" onclick="showStatus('+i+');">'+i+'</button></li>') ; 
+                }
+            }
+            $("#statusPageItem").append('<li class="page-item '+ nextPageIsActive +'"><button class="page-link" '
+                                   + 'onclick="showStatus('+ nextPage +');" aria-label="Next">'
+                                   + '<span aria-hidden="true">&raquo;</span><span class="sr-only">Next</span></button></li>'
+                                    ) ;
+            
+            // テーブル取得
+            var table = document.getElementById("statusList");
+
+            //テーブルをリセット
+            while (table.rows[1]) table.deleteRow(-1);
+            
+            //テーブル表示
+            for (var i = (pageNumber-1)*STATUS_NUM_PER_PAGE; i < pageNumber*STATUS_NUM_PER_PAGE; i++) {
+                //配列の要素数を超えたらbreak
+                if(i==cacheStatusList.length){
+                    break ;
+                }
+                
+                // 行を行末に追加
+                var row = table.insertRow(-1);
+                // セルの挿入
+                insertCell(row, cacheStatusList[i].buttonStr);
+                insertCell(row, cacheStatusList[i].status);
+                insertCell(row, cacheStatusList[i].bookId);
+                insertCell(row, cacheStatusList[i].bookTitle);
+                insertCell(row, cacheStatusList[i].counterUserName);
+                insertCell(row, cacheStatusList[i].counterUserOffice);
+                insertCell(row, cacheStatusList[i].counterUserDepartment);
+            }    
+        }
+        
+        
+        //ステータス情報のロード
+        function loadStatus() {
+            //キャッシュのクリア
+            cacheStatusList = [] ;
+            
+            //mining中情報をステータス用に変換しながらpush
+            for (var i = 0; i < miningTxs.length; i++) {
+                cacheStatusList.push(makeStatusObj("",miningTxs[i].status,miningTxs[i].bookId,miningTxs[i].bookTitle,
+                                                  miningTxs[i].counterUserName,miningTxs[i].counterUserOffice,miningTxs[i].counterUserDepartment)) ;
+            }
+                                     
+            //リクエスト情報取得(インデックスをずらしながら)
+            var requestNum = contractTransactionLogic.myRequestNum() ;
+            for(var i=0;i<requestNum;i=i+CONTRACT_ARRAY_ROWS){
+                var convertedRequestList = convertRequestList(contractTransactionLogic.myRequestListDesc(i));
+                //リクエスト情報をステータス用に変換しながらpush
+                for(var j=0;j<convertedRequestList.length;j++){
+                    //貸出OKのものはrental listを表示するので、表示しない
+                    if (convertedRequestList[j].status == 1) {
+                        continue;
+                    } 
+                    //既にリアクションしてMining中の場合は表示しない
+                    else if (isMiningTx(MINING_STATUS_RENTAL_OK,convertedRequestList[j].requestId)){
+                        continue;
+                    }
+                    else if (isMiningTx(MINING_STATUS_RENTAL_NG,convertedRequestList[j].requestId)){
+                        continue;
+                    }
+                    
+                    //ステータスによって変える(要求中の場合)
+                    if (convertedRequestList[j].status == 0) {
+                        //ボタン表示 自分宛て(リクエスト出し元が自分じゃない)の貸し出しリクエストは貸すボタンをつける
+                        if (convertedRequestList[j].borrowerAddress != loginAccountaddress) {
+                            //貸出OKのボタン、NGのボタン
+                            var buttonStr = '<input type="button" class="cButton btn-primary" value="貸す" onclick="replyRental(' 
+                                           + convertedRequestList[j].requestId.toString() + ',' 
+                                           + convertedRequestList[j].bookId + ',\'' 
+                                           + convertedRequestList[j].bookTitle + '\',\'' 
+                                           + convertedRequestList[j].borrowerAddress 
+                                           + '\',' + 'true' + ') ; +'
+                                           + 'showCounterUserInfo(\'' + convertedRequestList[j].borrowerAddress + '\');" >' 
+                                           + '<br/>' 
+                                           + '<input type="button" class="cButton btn-danger" value="拒否" onclick="replyRental(' 
+                                           + convertedRequestList[j].requestId.toString() + ',' 
+                                           + convertedRequestList[j].bookId + ',\'' 
+                                           + convertedRequestList[j].bookTitle + '\',\''
+                                           + convertedRequestList[j].borrowerAddress 
+                                           + '\',' + 'false' + ') ;" >'
+                        } else {
+                            var buttonStr = "";
+                        }
+                        //ステータス
+                        var status = STATUS_REQUESTING ;
+                    }
+                    //ステータスによって変える(貸出NGの場合)
+                    else if (convertedRequestList[j].status == 2) {
+                        //ボタンは表示しない
+                        var buttonStr = "" ;
+                        //ステータス表示
+                        var status = STATUS_REQUEST_NG ;
+                    }
+                    //push
+                    cacheStatusList.push(makeStatusObj(buttonStr,status,convertedRequestList[j].bookId,convertedRequestList[j].bookTitle,"","","")) ;
+
+                }
+            }
+            
+            //レンタル情報取得(インデックスをずらしながら)
+            var rentalNum = contractTransactionLogic.myRentalNum() ;
+            for(var i=0;i<rentalNum;i=i+CONTRACT_ARRAY_ROWS){
+                var convertedRentalList = convertRentalList(contractTransactionLogic.myRentalListDesc(i));
+                
+                //レンタル情報をステータス用に変換しながらpush
+                for(var j=0;j<convertedRentalList.length;j++){
+                    //既にリアクションしてMining中の場合は表示しない
+                    if (isMiningTx(MINING_STATUS_RENTAL_START,convertedRentalList[j].rentalId)){
+                        continue;
+                    }
+                    else if (isMiningTx(MINING_STATUS_RENTAL_END,convertedRentalList[j].rentalId)){
+                        continue;
+                    }
+                
+                    //取引相手のアドレス
+                    var counterUserAddress;
+
+                    //自分宛ての貸し出しの場合、
+                    if (convertedRentalList[j].borrowerAddress == loginAccountaddress) {
+                        //貸出開始時刻が入っていない（=受領前）なら受領ボタンを表示
+                        if (convertedRentalList[j].startTime == 0) {
+                            var buttonStr = '<input type="button" class="cButton btn-primary" value="受領" onclick="startRental(' 
+                                + convertedRentalList[j].rentalId.toString() + ',' 
+                                + convertedRentalList[j].bookId + ',\'' 
+                                + convertedRentalList[j].bookTitle + '\',\'' 
+                                + convertedRentalList[j].lenderAddress + '\') ;" >' ;
+                        } else {
+                            var buttonStr = "" ;
+                        }
+                        //自分宛なので、相手先は貸し手の情報とする
+                        counterUserAddress = convertedRentalList[j].lenderAddress
+                    }
+                    
+                    //自分が貸主の場合、
+                    else if (convertedRentalList[j].lenderAddress == loginAccountaddress) {
+                        //貸出開始時刻が入っていて、貸出終了時刻が入っていなければ(貸し出し中なら)受領ボタンを表示
+                        if (convertedRentalList[j].startTime != 0 && convertedRentalList[j].endTime == 0) {
+                            var buttonStr = '<input type="button" class="cButton btn-primary" value="受領" onclick="endRental(' 
+                                + convertedRentalList[j].rentalId.toString() + ',' 
+                                + convertedRentalList[j].bookId + ',\'' 
+                                + convertedRentalList[j].bookTitle + '\',\'' 
+                                + convertedRentalList[j].borrowerAddress + '\') ;" >' ;
+                        } else {
+                            var buttonStr = "" ;
+                        }
+                        //自分が貸し手なので、相手先は借り手の情報とする
+                        counterUserAddress = convertedRentalList[j].borrowerAddress
+                    }
+                    
+                    //ステータスによって変える
+                    if (convertedRentalList[j].endTime == 0) {
+                        if (convertedRentalList[j].startTime == 0) {
+                            var status = STATUS_RENTAL_START ;
+                        } else {
+                            var status = STATUS_RENTALING ;
+                        }
+                    } else {
+                        var status = STATUS_RENTAL_END ;
+                    }
+                    
+                    //相手の情報を取得
+                    var counterUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(counterUserAddress));
+                    
+                    //push
+                    cacheStatusList.push(makeStatusObj(buttonStr,status,convertedRentalList[j].bookId,convertedRentalList[j].bookTitle,
+                                                       counterUserInfo.userName,counterUserInfo.userOffice,counterUserInfo.userDepartment)) ;
+
+                }   
+
+            }
+
+        }
+        
+        //ステータス情報に表示するようにObjectを生成する
+        function makeStatusObj(buttonStr,status,bookId,bookTitle,counterUserName,counterUserOffice,counterUserDepartment){
+            var statusObj = {} ;
+            statusObj.buttonStr = buttonStr ;
+            statusObj.status = status ;
+            statusObj.bookId = bookId ;
+            statusObj.bookTitle = bookTitle ;
+            statusObj.counterUserName = counterUserName ;
+            statusObj.counterUserOffice = counterUserOffice ;
+            statusObj.counterUserDepartment = counterUserDepartment ;
+            return statusObj ;
+        }
+
+        /* 貸借取引操作系 */
+
+        //本を借りるリクエスト
+        function requestRental(bookId) {
+            //ステータス表示用の本情報を取得
+            var bookInfo = convertBookInfo(contractBookLogic.bookInfoById(bookId));
+            var miningObj = new Object();
+            miningObj.bookId = bookId;
+            miningObj.bookTitle = bookInfo.title;
+            miningObj.lenderAddress = bookInfo.holder;
+            miningObj.borrowerAddress = loginAccountaddress;
+            miningObj.status = MINING_STATUS_REQUESTING;
+
+            //リクエスト
+            miningObj.txhash = contractTransactionLogic.requestRental.sendTransaction(bookId, {
+                from: loginAccountaddress,
+                gas: gas
+            });
+
+            //リクエスト情報をmining中に登録する
+            pushMiningTx(miningObj);
+        }
+
+        //貸出要求に応じる 同時にneo4jに貸出関係性を登録する
+        function replyRental(requestId, bookId, bookTitle, borrowerAddress, isOkFlg) {
+            //ステータス表示用の情報をセット
+            var miningObj = new Object();
+            miningObj.bookId = bookId;
+            miningObj.bookTitle = bookTitle;
+            miningObj.lenderAddress = loginAccountaddress;
+            miningObj.borrowerAddress = borrowerAddress;
+            //貸出OKかどうかによって変える
+            if (isOkFlg) {
+                miningObj.status = MINING_STATUS_RENTAL_OK;
+            } else {
+                miningObj.status = MINING_STATUS_RENTAL_NG;
+            }
+            miningObj.trnId = requestId ;
+
+            //応答トランザクション
+            miningObj.txhash = contractTransactionLogic.replyRental.sendTransaction(requestId, isOkFlg, {
+                from: loginAccountaddress,
+                gas: gas
+            });
+
+            //リクエスト情報をmining中に登録する
+            pushMiningTx(miningObj);
+
+            //貸出OKの場合、関係性を登録
+            if (isOkFlg) {
+                /*neo4jに貸借の関係性を登録する(n1->n2)*/
+                //各関係性の登録に必要な情報⇒貸主と借主の名前を取得
+                var lenderUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(loginAccountaddress));
+                var borrowerUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(borrowerAddress));
+
+                //貸主⇒本でLendの関係性を登録する
+                var addRelationQueryObj1 = {};
+                //n1:User Node
+                addRelationQueryObj1.nodeName1 = "User";
+                //n2:Book Node
+                addRelationQueryObj1.nodeName2 = "Book";
+
+                //n1:User Nodeの検索パラメータ
+                var matchParams1 = [{
+                    label: "name",
+                    value: lenderUserInfo.userName
+                }];
+                addRelationQueryObj1.matchParams1 = matchParams1;
+
+                //n2:Book Nodeの検索パラメータ
+                var matchParams2 = [{
+                    label: "title",
+                    value: bookTitle
+                }];
+                addRelationQueryObj1.matchParams2 = matchParams2;
+                //関係性=lend
+                addRelationQueryObj1.relationRole = "lend";
+                //関係性の追加
+                addRelationToNeo4j(addRelationQueryObj1);
+
+                //借主⇒本でBorrowの関係性を登録する(lend関係性追加用に作った配列をほぼ使いまわし)
+                var addRelationQueryObj2 = $.extend(true, {}, addRelationQueryObj1);
+                //関係性=borrow
+                addRelationQueryObj2.relationRole = "borrow";
+                //ユーザ=借り手
+                matchParams1 = [{
+                    label: "name",
+                    value: borrowerUserInfo.userName
+                }];
+                addRelationQueryObj2.matchParams1 = matchParams1;
+                //関係性の追加
+                addRelationToNeo4j(addRelationQueryObj2);
+            }
+        }
+
+        //借主が貸し出された書籍を受取り、貸出をスタートする
+        function startRental(rentalId, bookId, bookTitle, lenderAddress) {
+            //ステータス表示用の本情報を取得
+            var miningObj = new Object();
+            miningObj.bookId = bookId;
+            miningObj.bookTitle = bookTitle;
+            miningObj.lenderAddress = lenderAddress;
+            miningObj.borrowerAddress = loginAccountaddress;
+            miningObj.status = MINING_STATUS_RENTAL_START;
+            miningObj.trnId = rentalId ;
+
+            //受領確認する
+            miningObj.txhash = contractTransactionLogic.startRental.sendTransaction(rentalId, {
+                from: loginAccountaddress,
+                gas: gas
+            });
+
+            //レンタル情報をmining中に登録する
+            pushMiningTx(miningObj);
+        }
+
+        //貸主が返却された書籍を受取り、貸出を終了する
+        function endRental(rentalId, bookId, bookTitle, borrowerAddress) {
+            //ステータス表示用の本情報を取得
+            var miningObj = new Object();
+            miningObj.bookId = bookId;
+            miningObj.bookTitle = bookTitle;
+            miningObj.lenderAddress = loginAccountaddress;
+            miningObj.borrowerAddress = borrowerAddress;
+            miningObj.status = MINING_STATUS_RENTAL_END;
+            miningObj.trnId = rentalId ;
+            
+            //受領確認する
+            miningObj.txhash = contractTransactionLogic.endRental.sendTransaction(rentalId, {
+                from: loginAccountaddress,
+                gas: gas
+            });
+
+            //レンタル情報をmining中に登録する
+            pushMiningTx(miningObj);
+        }
+
+        //指定されたrequest,rentalのトランザクションがmining中のものか確認する
+        function isMiningTx(targetMiningStatus,trnId){
+            //ターゲットとするステータスとトランザクションのID(requestId or rentalId)が同一ならmining中
+            for(var i=0;i<miningTxs.length;i++){
+                if(miningTxs[i].status == targetMiningStatus && miningTxs[i].trnId == trnId){
+                    return true ;
+                }                
+            }
+            return false ;
+        }
+        //マイニング中トランザクションのリストにトランザクションを登録する
+        function pushMiningTx(miningObj) {
+            var pushObj = new Object();
+            pushObj.bookId = miningObj.bookId || "";
+            pushObj.bookTitle = miningObj.bookTitle || "";
+            pushObj.status = miningObj.status || "";
+            pushObj.txhash = miningObj.txhash;
+            pushObj.lenderAddress = miningObj.lenderAddress;
+            pushObj.borrowerAddress = miningObj.borrowerAddress;
+            pushObj.trnId = miningObj.trnId ;
+
+            //ステータスに応じて、借手、貸手のユーザ情報を取得
+            var counterUserInfo = {};
+            switch (miningObj.status) {
+                case MINING_STATUS_ADD_BOOK:
+                    counterUserInfo.userName = "";
+                    counterUserInfo.userOffice = "";
+                    counterUserInfo.userDepartment = "";
+                    break;
+                case MINING_STATUS_REQUESTING:
+                    //リクエストのタイミングでは、断ったときの影響を考慮し表示しない。
+                    counterUserInfo.userName = "";
+                    counterUserInfo.userOffice = "";
+                    counterUserInfo.userDepartment = "";
+                    break;
+                case MINING_STATUS_RENTAL_OK:
+                    counterUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(miningObj.borrowerAddress));
+                    break;
+                case MINING_STATUS_RENTAL_NG:
+                    //断ったときの影響を考慮し表示しない。
+                    counterUserInfo.userName = "";
+                    counterUserInfo.userOffice = "";
+                    counterUserInfo.userDepartment = "";
+                    break;
+                case MINING_STATUS_RENTAL_START:
+                    counterUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(miningObj.lenderAddress));
+                    break;
+                case MINING_STATUS_RENTAL_END:
+                    counterUserInfo = convertUserInfo(contractUserLogic.userInfoByAddress(miningObj.borrowerAddress));
+                    break;
+            }
+
+            //取引相手のユーザ情報をpush
+            pushObj.counterUserName = counterUserInfo.userName;
+            pushObj.counterUserOffice = counterUserInfo.userOffice;
+            pushObj.counterUserDepartment = counterUserInfo.userDepartment;
+
+            //mining中のトランザクションとして登録
+            miningTxs.push(pushObj);
+
+            //ステータス表示
+            clearStatus();
+        }
+
+
+        /* contractから取得した情報の整形系 */
+
+        //contractから取得したrequestListを利用可能なリクエスト情報に変換する
+        function convertRequestList(contractRequestList) {
+            var requestList = [];
+
+            //contractRequestListを1つずつ変換
+            for (var i = 0; i < contractRequestList.length; i++) {
+                if (getUint(contractRequestList[i][0]) !== 0) {
+                    requestList.push(convertRequest(contractRequestList[i]));
+                }
+            }
+
+            return requestList;
+        }
+
+        //contractから取得したrequestを利用可能なリクエスト情報に変換する（書籍情報との結合）
+        function convertRequest(contractRequest) {
+            var request = {};
+            request.requestId = getUint(contractRequest[0]);
+            request.bookId = getUint(contractRequest[1]);
+            request.requestTime = getUint(contractRequest[2]);
+            request.borrowerAddress = getAddressBytes(contractRequest[3]);
+            request.replyTime = getUint(contractRequest[4]);
+            request.lenderAddress = getAddressBytes(contractRequest[5]);
+            request.status = getUint(contractRequest[6]);
+
+            //本情報の結合
+            var bookInfo = convertBookInfo(contractBookLogic.bookInfoById(request.bookId));
+            request.bookTitle = bookInfo.title;
+            request.bookAuthor = bookInfo.author;
+            request.bookIsbn = bookInfo.isbn;
+
+            return request;
+        }
+
+        //contractから取得したrentalListを利用可能なレンタル情報に変換する
+        function convertRentalList(contractRentalList) {
+            var rentalList = [];
+
+            //contractRentalListを1つずつ変換
+            for (var i = 0; i < contractRentalList.length; i++) {
+                if (getUint(contractRentalList[i][0]) !== 0) {
+                    rentalList.push(convertRental(contractRentalList[i]));
+                }
+            }
+
+            return rentalList;
+        }
+
+        //contractから取得したrentalListを利用可能なレンタル情報に変換する（書籍情報との結合）
+        function convertRental(contractRental) {
+            var rental = {};
+            rental.rentalId = getUint(contractRental[0]);
+            rental.bookId = getUint(contractRental[1]);
+            rental.lenderAddress = getAddressBytes(contractRental[2]);
+            rental.borrowerAddress = getAddressBytes(contractRental[3]);
+            rental.startTime = getUint(contractRental[4]);
+            rental.endTime = getUint(contractRental[5]);
+
+            //本情報の結合
+            var bookInfo = convertBookInfo(contractBookLogic.bookInfoById(rental.bookId));
+            rental.bookTitle = bookInfo.title;
+            rental.bookAuthor = bookInfo.author;
+            rental.bookIsbn = bookInfo.isbn;
+
+            return rental;
+        }
+
+        //contractから取得したbookInfoListを利用可能な書籍情報に変換する(IPFSの情報とマージと型変換)
+        function convertBookInfoList(contractBookInfoList) {
+            var bookInfoList = [];
+
+            //contractBookInfoListを1つずつ変換
+            for (var i = 0; i < contractBookInfoList.length; i++) {
+                if (getUint(contractBookInfoList[i][0]) != 0) {
+                    bookInfoList.push(convertBookInfo(contractBookInfoList[i]));
+                }
+            }
+
+            return bookInfoList;
+        }
+
+        //contractから取得したbookInfoを利用可能な書籍情報に変換する(IPFSの情報とマージと型変換)
+        function convertBookInfo(contractBookInfo) {
+            var bookInfo = {};
+            bookInfo.bookId = getUint(contractBookInfo[0]);
+
+            //IPFSのhashを取得
+            var hash = toAscii(contractBookInfo[2]) + toAscii(contractBookInfo[3]);
+
+            //IPFSから書籍情報を取得
+            var ipfsBookInfo = getFromIpfs(hash);
+
+            //IPFSの書籍情報とcontractからの書籍情報から利用可能な書籍情報を作成
+            if (ipfsBookInfo) {
+                bookInfo.title = ipfsBookInfo.book_title;
+                bookInfo.author = ipfsBookInfo.book_author;
+                bookInfo.isbn = ipfsBookInfo.book_isbn;
+            } else {
+                bookInfo.title = "Load Error";
+                bookInfo.author = "Load Error";
+                bookInfo.isbn = "Load Error";
+            }
+
+            bookInfo.owner = getAddressBytes(contractBookInfo[4]);
+            bookInfo.holder = getAddressBytes(contractBookInfo[5]);
+            return bookInfo;
+        }
+
+        //contractから取得したmyUserInfoを利用可能なユーザ情報に変換する(IPFSの情報とマージと型変換)
+        function convertMyUserInfo(contractMyUserInfo) {
+            var userInfo = {};
+            userInfo.userAddress = getAddressBytes(contractMyUserInfo[0]);
+
+            //IPFSのhashを取得
+            var hash = toAscii(contractMyUserInfo[1]) + toAscii(contractMyUserInfo[2]);
+
+            //IPFSから書籍情報を取得
+            var ipfsBookInfo = getFromIpfs(hash);
+
+            //IPFSのユーザ情報とcontractからのユーザ情報から利用可能なユーザ情報を作成
+            if (ipfsBookInfo) {
+                userInfo.userName = ipfsBookInfo.user_name;
+                userInfo.userOffice = ipfsBookInfo.user_office;
+                userInfo.userDepartment = ipfsBookInfo.user_department;
+            } else {
+                userInfo.userName = "Load Error";
+                userInfo.userOffice = "Load Error";
+                userInfo.userDepartment = "Load Error";
+            }
+
+
+            //ポイントの取得
+            userInfo.userPoint = getUint(contractMyUserInfo[3]);
+
+            return userInfo;
+        }
+
+        //contractから取得したuserInfoを利用可能なユーザ情報に変換する(IPFSの情報とマージと型変換)
+        function convertUserInfo(contractUserInfo) {
+            var userInfo = {};
+            userInfo.userAddress = getAddressBytes(contractUserInfo[0]);
+
+            //IPFSのhashを取得
+            var hash = toAscii(contractUserInfo[1]) + toAscii(contractUserInfo[2]);
+
+            //IPFSから書籍情報を取得
+            var ipfsBookInfo = getFromIpfs(hash);
+
+            //IPFSのユーザ情報とcontractからのユーザ情報から利用可能なユーザ情報を作成
+            if (ipfsBookInfo) {
+                userInfo.userName = ipfsBookInfo.user_name;
+                userInfo.userOffice = ipfsBookInfo.user_office;
+                userInfo.userDepartment = ipfsBookInfo.user_department;
+            } else {
+                userInfo.userName = "Load Error";
+                userInfo.userOffice = "Load Error";
+                userInfo.userDepartment = "Load Error";
+            }
+
+            return userInfo;
+        }
+
+        /* RPC操作系 */
+        //GethRPC用のJSONメッセージ生成
+        function createGethRpcJSONdata(method, params) {
+            var JSONdata = {
+                "id": 0,
+                "method": method,
+                "params": params
+            };
+            return JSONdata;
+        }
+
+        //JSON-RPC実行(jqueryのajax)
+        function executeJsonRpc(url_exec, JSONdata, success, error) {
+            $.ajax({
+                type: 'post',
+                url: url_exec,
+                data: JSON.stringify(JSONdata),
+                contentType: 'application/JSON',
+                dataType: 'JSON',
+                scriptCharset: 'utf-8'
+            }).done(function(j_data) {
+                success(j_data);
+            }).fail(function(j_data) {
+                error(j_data);
+            });
+        }
+
+        /* IPFS操作系 */
+        //IPFSへのJSON追加
+        function addToIpfs(jsonData) {
+            return res = ipc.sendSync("addJsonToIpfs", jsonData);
+        }
+
+        //IPFSからのJSON取得
+        function getFromIpfs(hash) {
+            return res = ipc.sendSync("getJsonFromIpfs", hash);
+        }
+
+        /*neo4j操作系*/
+        //neo4jにノードを登録
+        function createNodeToNeo4j(queryObj) {
+            var neo4jSession = neo4jDriver.session();
+            //クエリ文字列の生成
+            var queryStr = `CREATE (n:${queryObj.nodeName}{`;
+            //登録するパラメータ（可変）をクエリ文字列に追加
+            for (i = 0; i < queryObj.params.length; i++) {
+                if (i !== 0) {
+                    queryStr += ",";
+                }
+                queryStr += `${queryObj.params[i].label} : "${queryObj.params[i].value}"`;
+            }
+            queryStr += "})";
+            //クエリの実行
+            neo4jSession.run(queryStr);
+        }
+        //neo4jのノード情報を変更
+        function updateNeo4jNode(queryObj) {
+            var neo4jSession = neo4jDriver.session();
+            //クエリ文字列の生成(検索部)
+            var queryStr = `MATCH (n:${queryObj.nodeName}{`;
+            //検索パラメータ（可変）をクエリ文字列に追加
+            for (i = 0; i < queryObj.matchParams.length; i++) {
+                if (i !== 0) {
+                    queryStr += ",";
+                }
+                queryStr += `${queryObj.matchParams[i].label} : "${queryObj.matchParams[i].value}"`;
+            }
+            queryStr += "}) ";
+            //クエリ文字列の生成(セット部)
+            queryStr += "SET ";
+            //セットパラメータ（可変）をクエリ文字列に追加
+            for (i = 0; i < queryObj.setParams.length; i++) {
+                if (i !== 0) {
+                    queryStr += ",";
+                }
+                queryStr += `n.${queryObj.setParams[i].label} = "${queryObj.setParams[i].value}"`;
+            }
+            //クエリの実行
+            neo4jSession.run(queryStr);
+        }
+        //neo4jの2ノード間の関係性を追加n1->n2
+        function addRelationToNeo4j(queryObj) {
+            var neo4jSession = neo4jDriver.session();
+            //クエリ文字列の生成(検索部:1ノード目)
+            var queryStr = `MATCH (n1:${queryObj.nodeName1}{`;
+            //検索パラメータ（可変）をクエリ文字列に追加
+            for (i = 0; i < queryObj.matchParams1.length; i++) {
+                if (i !== 0) {
+                    queryStr += ",";
+                }
+                queryStr += `${queryObj.matchParams1[i].label} : "${queryObj.matchParams1[i].value}"`;
+            }
+            queryStr += "}) , ";
+
+            //クエリ文字列の生成(検索部:2ノード目)
+            queryStr += `(n2:${queryObj.nodeName2}{`;
+            //検索パラメータ（可変）をクエリ文字列に追加
+            for (i = 0; i < queryObj.matchParams2.length; i++) {
+                if (i !== 0) {
+                    queryStr += ",";
+                }
+                queryStr += `${queryObj.matchParams2[i].label} : "${queryObj.matchParams2[i].value}"`;
+            }
+            queryStr += "}) ";
+
+            //関係付け
+            queryStr += `MERGE (n1)-[roles:${queryObj.relationRole}]->(n2)`
+
+            console.log(queryStr);
+            //クエリの実行
+            neo4jSession.run(queryStr);
+
+        }
+
+        /* ユーティリティ */
+        //16進Byte表現⇒Ascii文字列変換（null文字削除込み)
+        //ethereumのコントラクトでは、整数のみの値はintに解釈されてしまうので、現状は文字列としてdecodeすると値がおかしくなる。
+        function toAscii(byteStr) {
+            return web3.toAscii(byteStr).replace(/\0/g, "");
+        }
+
+        //byte表現からehtereumアカウントアドレスを切り出す
+        function getAddressBytes(byteStr) {
+            return "0x" + byteStr.substr(byteStr.length - 40, 40);
+        }
+        //byte表現からuintの表現を取り出す
+        function getUint(byteStr) {
+            return parseInt(byteStr.substr(2, byteStr.length - 2), 16);
+        }
+        //セルに情報を追加
+        function insertCell(row, innerHTML) {
+            var cell = row.insertCell(-1);
+            cell.innerHTML = innerHTML;
+        }
+        //IPFSのハッシュを２分割して返す
+        function sliceHash(rawHash) {
+            var resultHash = {};
+            resultHash.hashFirst = rawHash.slice(0, 32);
+            resultHash.hashSecond = rawHash.slice(32);
+            return resultHash;
+        }
+
+        /* エラーロギング */
+        window.onerror = function(message, file, line) {
+            loger('An error occured at line ' + line + ' of ' + file + ': ' + message);
+        };
+
+        function loger(message) {
+            ipc.send("log", message);
+        }
+
+        /* config読込 */
+        function readConfigFile() {
+            return res = ipc.sendSync("readConfigFile");
+        }
+        //Loginフォームを表示する
+        function showLogIn(){
+            $("#loginButton").css('display', 'block');
+            $("#signUpButton").css('display', 'none');   
+            $("#accountAddress").css("visibility","visible");
+            $("#signupNav").removeClass("active");
+            $("#loginNav").addClass("active");
+        } 
+        //SignUpフォームを表示する
+        function showSignUp(){
+            $("#signUpButton").css('display', 'block');
+            $("#loginButton").css('display', 'none');   
+            $("#accountAddress").css("visibility","hidden");
+            $("#loginNav").removeClass("active");
+            $("#signupNav").addClass("active");
+        }
+    </script>
+</head>
+
+<body>
+
+    <nav id="sub">
+        <br/>
+        <div class="form">
+            <ul class="nav nav-pills nav-fill">
+              <li class="nav-item">
+                <a id="loginNav" class="nav-link active" href="#" onclick="showLogIn();">Log in</a>
+              </li>
+              <li class="nav-item">
+                <a id="signupNav" class="nav-link" href="#" onclick="showSignUp();">Sign up</a>
+              </li>
+            </ul>
+            <input type="text" id="accountAddress" placeholder="ACCOUNT ADDRESS" />
+            <input type="password" id="accountPassword" placeholder="PASSWORD" />
+            <button id="loginButton" onclick="login();">Login</button>
+            <button id="signUpButton" onclick="signup();">SignUp</button>
+        </div>
+        <br/>
+        <div class="form">
+            <h1>Mobile Link</h1>
+            <button id="showQrcode" onclick="showAddBookQrcode();">Show QRcode</button>
+            <button onclick="downloadBookInfo();">Download Book</button>
+            <button onclick="downloadTrn();">Download Transaction</button>
+        </div>
+        <br/>
+        <div class="form">
+            <h1>Register User</h1>
+            <input type="text" id="userName" placeholder="NAME" />
+            <input type="text" id="userOffice" placeholder="OFFICE" />
+            <input type="text" id="userDepartment" placeholder="DEPARTMENT" />
+            <button onclick="editMyUserInfo();">Register UserInfo</button>
+        </div>
+        <br/>
+        <div id="addBookQrcode"></div>
+    </nav>
+    <article id="main">
+        <div class="header">
+
+            <table class="userInfo">
+                <tr>
+                    <th>UserName</th>
+                    <th>Office</th>
+                    <th>Department</th>
+                    <th>Point</th>
+                </tr>
+                <tr>
+                    <td id="userNameT"></td>
+                    <td id="userOfficeT"></td>
+                    <td id="userDepartmentT"></td>
+                    <td id="userPointT"></td>
+                </tr>
+            </table>
+
+        </div>
+        <div>
+          <ul class="pagination pg-blue" id="statusPageItem">
+          </ul>
+        </div>
+        <table class="zebra" id="statusList">
+            <th>　　　</th>
+            <th>状況</th>
+            <th>本ID</th>
+            <th>本のタイトル</th>
+            <th>相手の名前</th>
+            <th>相手の執務室</th>
+            <th>相手の部署</th>
+        </table>
+        <br />
+        <h4>書籍検索</h4>
+        <input type="text" id="searchBookKey" /><button class="cButton btn-primary waves-light "  onclick="searchBookInfo();" >検索</button>
+        <br />
+        <div>
+          <ul class="pagination pg-blue" id="bookPageItem">
+          </ul>
+        </div>
+        <table class="zebra" id="bookList">
+            <th>　　　</th>
+            <th>ID</th>
+            <th>Title</th>
+            <th>Author</th>
+            <th>ISBN</th>
+        </table>
+    </article>
+</body>
+
+</html>
